@@ -1,0 +1,109 @@
+import pandas as pd
+from tkinter import Tk, filedialog
+import os
+import subprocess
+from datetime import timedelta
+
+# Oculta a janela principal do Tkinter
+Tk().withdraw()
+
+# Seleciona o arquivo
+arquivo = filedialog.askopenfilename(
+    title="Selecione a planilha com as diárias",
+    filetypes=[("Planilhas Excel", "*.xlsx *.xls")]
+)
+
+if not arquivo:
+    raise FileNotFoundError("Nenhum arquivo selecionado.")
+
+# Carrega a planilha
+df = pd.read_excel(arquivo)
+
+# Verificação das colunas necessárias
+required_columns = {
+    3: "Loja",
+    13: "Motoboy",
+    22: "Data"
+}
+
+# Verifica se as colunas existem
+for col_idx, col_name in required_columns.items():
+    if col_idx >= len(df.columns):
+        raise ValueError(f"Coluna {col_name} (índice {col_idx}) não encontrada no arquivo.")
+
+# Renomeia as colunas
+df = df.rename(columns={
+    df.columns[3]: "Loja",
+    df.columns[13]: "Motoboy",
+    df.columns[22]: "Data"
+})
+
+# Converte a coluna de datas para datetime
+df["Data"] = pd.to_datetime(df["Data"], errors='coerce')
+
+# Filtra registros com datas válidas
+df = df[df["Data"].notna()]
+
+# Cria a coluna "Dia da Semana" e mapeia para o português
+df["Dia da Semana"] = df["Data"].dt.day_name()
+mapa_dias = {
+    'Monday': 'Segunda',
+    'Tuesday': 'Terça',
+    'Wednesday': 'Quarta',
+    'Thursday': 'Quinta',
+    'Friday': 'Sexta',
+    'Saturday': 'Sábado',
+    'Sunday': 'Domingo'
+}
+df["Dia da Semana"] = df["Dia da Semana"].map(mapa_dias)
+
+# Função para identificar a semana de 7 dias, com base na data inicial
+data_inicio = pd.to_datetime("2025-02-01")  # Defina o início da primeira semana
+
+def identificar_semana(data):
+    delta_dias = (data - data_inicio).days
+    semana = delta_dias // 7 + 1  # Calcula a semana de 7 dias
+    data_inicio_semana = data_inicio + timedelta(weeks=semana-1)
+    data_fim_semana = data_inicio_semana + timedelta(days=6)
+    return f"{data_inicio_semana.strftime('%d/%m/%Y')} a {data_fim_semana.strftime('%d/%m/%Y')}"
+
+# Aplica a função para identificar as semanas
+df["Semana"] = df["Data"].apply(identificar_semana)
+
+# Relatório por semana e dia da semana
+relatorio_semanal = df.groupby(["Semana", "Dia da Semana"]).size().unstack(fill_value=0).reindex(columns=mapa_dias.values(), fill_value=0)
+
+# Relatório por loja, semana e dia da semana
+relatorio_lojas = df.groupby(["Loja", "Semana", "Dia da Semana"]).size().unstack(fill_value=0).reindex(columns=mapa_dias.values(), fill_value=0)
+
+# Calcular a média de motoboys por dia da semana em cada loja
+relatorio_lojas["Média de Motoboys"] = df.groupby(["Loja", "Dia da Semana"])["Motoboy"].nunique().unstack(fill_value=0).mean(axis=1)
+
+# Relatório geral: contagem de diárias por dia da semana
+relatorio_geral = df["Dia da Semana"].value_counts().reindex(mapa_dias.values(), fill_value=0).to_frame("Total de Diárias")
+
+# Média geral por mês
+df["Mês"] = df["Data"].dt.to_period("M")
+media_geral_mes = df.groupby("Mês")["Motoboy"].nunique().mean()
+
+# Salva os resultados
+pasta_saida = os.path.dirname(arquivo)
+arquivo_saida = os.path.join(pasta_saida, "Resumo_Diarias_Semanal_Com_Media.xlsx")
+
+with pd.ExcelWriter(arquivo_saida, engine='openpyxl') as writer:
+    relatorio_geral.to_excel(writer, sheet_name="Resumo Geral")
+    relatorio_lojas.to_excel(writer, sheet_name="Resumo por Loja e Semana")
+    relatorio_semanal.to_excel(writer, sheet_name="Resumo Semanal")
+    pd.DataFrame({"Média Geral Mensal": [media_geral_mes]}).to_excel(writer, sheet_name="Média Geral Mensal")
+
+print(f"\n✅ Planilha gerada com sucesso: {arquivo_saida}")
+
+# Abre a planilha automaticamente
+try:
+    os.startfile(arquivo_saida)  # Windows
+except AttributeError:
+    subprocess.call(['open', arquivo_saida])  # macOS
+except Exception:
+    subprocess.call(['xdg-open', arquivo_saida])  # Linux
+
+print("\n--- Processo concluído ---")
