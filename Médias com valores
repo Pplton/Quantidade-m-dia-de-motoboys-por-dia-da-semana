@@ -1,0 +1,167 @@
+import pandas as pd
+from tkinter import Tk, filedialog
+import os
+import subprocess
+from datetime import timedelta
+
+# Oculta a janela principal do Tkinter
+Tk().withdraw()
+
+# Seleciona o arquivo
+arquivo = filedialog.askopenfilename(
+    title="Selecione a planilha com as diárias",
+    filetypes=[("Planilhas Excel", "*.xlsx *.xls")]
+)
+
+if not arquivo:
+    raise FileNotFoundError("Nenhum arquivo selecionado.")
+
+# Carrega a planilha
+df = pd.read_excel(arquivo, engine='openpyxl')
+
+# Verificação das colunas necessárias
+required_columns = {
+    3: "Loja",
+    13: "Motoboy",
+    16: "Valor Cobrado",
+    18: "Valor Pago",
+    22: "Data"
+}
+
+for col_idx, col_name in required_columns.items():
+    if col_idx >= len(df.columns):
+        raise ValueError(f"Coluna {col_name} (índice {col_idx}) não encontrada no arquivo.")
+
+# Renomeia as colunas
+df = df.rename(columns={
+    df.columns[3]: "Loja",
+    df.columns[13]: "Motoboy",
+    df.columns[16]: "Valor Cobrado",
+    df.columns[18]: "Valor Pago",
+    df.columns[22]: "Data"
+})
+
+# Converte a coluna de datas
+df["Data"] = pd.to_datetime(df["Data"], dayfirst=True, errors='coerce')
+df = df[df["Data"].notna()]
+
+# Cria coluna "Dia da Semana" mapeada
+df["Dia da Semana"] = df["Data"].dt.day_name()
+mapa_dias = {
+    'Monday': 'Segunda',
+    'Tuesday': 'Terça',
+    'Wednesday': 'Quarta',
+    'Thursday': 'Quinta',
+    'Friday': 'Sexta',
+    'Saturday': 'Sábado',
+    'Sunday': 'Domingo'
+}
+df["Dia da Semana"] = df["Dia da Semana"].map(mapa_dias)
+
+# Converte "Valor Cobrado"
+df["Valor Cobrado"] = (
+    df["Valor Cobrado"]
+    .astype(str)
+    .str.replace("R$", "", regex=False)
+    .str.replace(".", "", regex=False)
+    .str.replace(",", ".", regex=False)
+    .str.strip()
+)
+df["Valor Cobrado"] = pd.to_numeric(df["Valor Cobrado"], errors='coerce').fillna(0)
+
+# Converte "Valor Pago"
+df["Valor Pago"] = (
+    df["Valor Pago"]
+    .astype(str)
+    .str.replace(".", "", regex=False)
+    .str.replace(",", ".", regex=False)
+    .str.strip()
+)
+df["Valor Pago"] = pd.to_numeric(df["Valor Pago"], errors='coerce').fillna(0)
+
+# Semana por faixa de 7 dias
+data_inicio = pd.to_datetime("2025-02-01")
+
+def identificar_semana(data):
+    delta_dias = (data - data_inicio).days
+    semana = delta_dias // 7 + 1
+    data_inicio_semana = data_inicio + timedelta(weeks=semana - 1)
+    data_fim_semana = data_inicio_semana + timedelta(days=6)
+    return f"{data_inicio_semana.strftime('%d/%m/%Y')} a {data_fim_semana.strftime('%d/%m/%Y')}"
+
+df["Semana"] = df["Data"].apply(identificar_semana)
+
+# Relatório Geral por Dia da Semana
+total_diarias = df["Dia da Semana"].value_counts().reindex(mapa_dias.values(), fill_value=0).to_frame("Total de Diárias")
+total_cobrado = df.groupby("Dia da Semana")["Valor Cobrado"].sum().reindex(mapa_dias.values(), fill_value=0)
+total_pago = df.groupby("Dia da Semana")["Valor Pago"].sum().reindex(mapa_dias.values(), fill_value=0)
+lucro = total_cobrado - total_pago
+margem = (lucro / total_cobrado.replace(0, 1)) * 100
+
+relatorio_geral = pd.concat([total_diarias, total_cobrado, total_pago, lucro, margem], axis=1)
+relatorio_geral.columns = ["Total de Diárias", "Total Cobrado", "Total Pago", "Lucro", "Margem (%)"]
+
+# Formata valores
+for col in ["Total Cobrado", "Total Pago", "Lucro"]:
+    relatorio_geral[col] = relatorio_geral[col].apply(lambda x: f"R$ {x:,.2f}".replace(".", "#").replace(",", ".").replace("#", ","))
+
+relatorio_geral["Margem (%)"] = relatorio_geral["Margem (%)"].apply(lambda x: f"{x:.1f}%")
+
+# Relatório Semanal (Qtd, Valor Cobrado, Valor Pago)
+qtd_semanal = df.groupby(["Semana", "Dia da Semana"]).size().unstack(fill_value=0).reindex(columns=mapa_dias.values(), fill_value=0)
+cobrados_semanal = df.groupby(["Semana", "Dia da Semana"])["Valor Cobrado"].sum().unstack(fill_value=0).reindex(columns=mapa_dias.values(), fill_value=0)
+pagos_semanal = df.groupby(["Semana", "Dia da Semana"])["Valor Pago"].sum().unstack(fill_value=0).reindex(columns=mapa_dias.values(), fill_value=0)
+
+relatorio_semanal = pd.concat(
+    {"Qtd Entregas": qtd_semanal, "Valor Cobrado": cobrados_semanal, "Valor Pago": pagos_semanal},
+    axis=1
+)
+
+# Formata valores do relatorio_semanal
+for grupo in ["Valor Cobrado", "Valor Pago"]:
+    for col in relatorio_semanal[grupo].columns:
+        relatorio_semanal[(grupo, col)] = relatorio_semanal[(grupo, col)].apply(lambda x: f"R$ {x:,.2f}".replace(".", "#").replace(",", ".").replace("#", ","))
+
+# Relatório por Loja e Semana
+qtd_loja = df.groupby(["Loja", "Semana", "Dia da Semana"]).size().unstack(fill_value=0).reindex(columns=mapa_dias.values(), fill_value=0)
+cobrados_loja = df.groupby(["Loja", "Semana", "Dia da Semana"])["Valor Cobrado"].sum().unstack(fill_value=0).reindex(columns=mapa_dias.values(), fill_value=0)
+pagos_loja = df.groupby(["Loja", "Semana", "Dia da Semana"])["Valor Pago"].sum().unstack(fill_value=0).reindex(columns=mapa_dias.values(), fill_value=0)
+
+relatorio_lojas = pd.concat(
+    {"Qtd Entregas": qtd_loja, "Valor Cobrado": cobrados_loja, "Valor Pago": pagos_loja},
+    axis=1
+)
+
+# Formata valores do relatorio_lojas
+for grupo in ["Valor Cobrado", "Valor Pago"]:
+    for col in relatorio_lojas[grupo].columns:
+        relatorio_lojas[(grupo, col)] = relatorio_lojas[(grupo, col)].apply(lambda x: f"R$ {x:,.2f}".replace(".", "#").replace(",", ".").replace("#", ","))
+
+# Média de motoboys por loja
+relatorio_lojas["Média de Motoboys"] = df.groupby(["Loja", "Dia da Semana"])["Motoboy"].nunique().unstack(fill_value=0).mean(axis=1)
+
+# Média geral por mês
+df["Mês"] = df["Data"].dt.to_period("M")
+media_geral_mes = df.groupby("Mês")["Motoboy"].nunique().mean()
+
+# Salva os resultados
+pasta_saida = os.path.dirname(arquivo)
+arquivo_saida = os.path.join(pasta_saida, "Resumo_Diarias_Semanal_Com_Media.xlsx")
+
+with pd.ExcelWriter(arquivo_saida, engine='openpyxl') as writer:
+    relatorio_geral.to_excel(writer, sheet_name="Resumo Geral")
+    relatorio_lojas.to_excel(writer, sheet_name="Resumo por Loja e Semana")
+    relatorio_semanal.to_excel(writer, sheet_name="Resumo Semanal")
+    pd.DataFrame({"Média Geral Mensal": [media_geral_mes]}).to_excel(writer, sheet_name="Média Geral Mensal")
+
+print(f"\n✅ Planilha gerada com sucesso: {arquivo_saida}")
+
+# Abre a planilha automaticamente
+try:
+    os.startfile(arquivo_saida)  # Windows
+except AttributeError:
+    subprocess.call(['open', arquivo_saida])  # macOS
+except Exception:
+    subprocess.call(['xdg-open', arquivo_saida])  # Linux
+
+print("\n--- Processo concluído ---")
